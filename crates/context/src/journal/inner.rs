@@ -18,7 +18,7 @@ use primitives::{
     hints_util::unlikely,
     Address, Bytes, HashMap, Log, LogData, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256,
 };
-use state::{Account, EvmState, TransactionId, TransientStorage};
+use state::{Account, BalStorageReadMode, EvmState, TransactionId, TransientStorage};
 use std::vec::Vec;
 
 /// Configuration for the journal that affects EVM execution behavior.
@@ -77,6 +77,8 @@ pub struct JournalInner<ENTRY> {
     pub transaction_id: TransactionId,
     /// Journal configuration containing spec ID and EIP-7708 flags.
     pub cfg: JournalCfg,
+    /// Controls whether unchanged storage reads should be recorded in the BAL.
+    pub bal_storage_read_mode: BalStorageReadMode,
     /// Warm addresses containing both coinbase and current precompiles.
     pub warm_addresses: WarmAddresses,
     /// Addresses that were self-destructed for the first time in this transaction.
@@ -111,6 +113,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             transaction_id: TransactionId::ZERO,
             depth: 0,
             cfg: JournalCfg::default(),
+            bal_storage_read_mode: BalStorageReadMode::Required,
             warm_addresses: WarmAddresses::new(),
             selfdestructed_addresses: Vec::new(),
         }
@@ -145,12 +148,14 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             journal,
             transaction_id,
             cfg,
+            bal_storage_read_mode,
             warm_addresses,
             selfdestructed_addresses,
         } = self;
         // Cfg and state are not changed. They are always set again before execution.
         let _ = cfg;
         let _ = state;
+        *bal_storage_read_mode = BalStorageReadMode::Required;
         transient_storage.clear();
         *depth = 0;
 
@@ -177,6 +182,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             journal,
             transaction_id,
             cfg,
+            bal_storage_read_mode,
             warm_addresses,
             selfdestructed_addresses,
         } = self;
@@ -187,6 +193,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         });
         transient_storage.clear();
         *depth = 0;
+        *bal_storage_read_mode = BalStorageReadMode::Required;
         logs.clear();
         selfdestructed_addresses.clear();
         transaction_id.increment();
@@ -211,6 +218,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             journal,
             transaction_id,
             cfg,
+            bal_storage_read_mode,
             warm_addresses,
             selfdestructed_addresses,
         } = self;
@@ -219,6 +227,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         selfdestructed_addresses.clear();
 
         let mut state = mem::take(state);
+        *bal_storage_read_mode = BalStorageReadMode::Required;
 
         // Pre-EIP-161 normalization: adjust empty touched accounts so the database
         // layer can always apply post-EIP-161 commit semantics (destroy empty touched
@@ -313,6 +322,12 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     pub const fn set_eip7708_config(&mut self, disabled: bool, delayed_burn_disabled: bool) {
         self.cfg.eip7708_disabled = disabled;
         self.cfg.eip7708_delayed_burn_disabled = delayed_burn_disabled;
+    }
+
+    /// Sets BAL storage read recording mode.
+    #[inline]
+    pub const fn set_bal_storage_read_mode(&mut self, mode: BalStorageReadMode) {
+        self.bal_storage_read_mode = mode;
     }
 
     /// Mark account as touched as only touched accounts will be added to state.
@@ -871,6 +886,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             db,
             self.warm_addresses.access_list(),
             self.transaction_id,
+            self.bal_storage_read_mode,
         ))
     }
 
@@ -948,6 +964,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
                 db,
                 self.warm_addresses.access_list(),
                 self.transaction_id,
+                self.bal_storage_read_mode,
             ),
             is_cold,
         ))
@@ -1180,5 +1197,129 @@ mod tests {
         let state_load = result.unwrap();
         assert!(!state_load.is_cold); // Should be warm
         assert_eq!(state_load.data, U256::ZERO); // Empty slot
+    }
+
+    #[test]
+    fn sload_marks_unchanged_storage_read_omittable_for_bal() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        let test_address = address!("1000000000000000000000000000000000000000");
+        let test_key = U256::from(1);
+
+        journal
+            .state
+            .insert(test_address, Account::from(AccountInfo::default()));
+        journal.set_bal_storage_read_mode(BalStorageReadMode::OmitIfUnchanged);
+
+        let mut db = EmptyDB::new();
+        journal
+            .sload_assume_account_present(&mut db, test_address, test_key, false)
+            .unwrap();
+
+        let slot = journal
+            .state
+            .get(&test_address)
+            .unwrap()
+            .storage
+            .get(&test_key)
+            .unwrap();
+        assert_eq!(
+            slot.bal_storage_read_mode,
+            BalStorageReadMode::OmitIfUnchanged
+        );
+        assert!(!slot.should_update_bal());
+    }
+
+    #[test]
+    fn required_bal_storage_read_mode_wins_for_loaded_slot() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        let test_address = address!("1000000000000000000000000000000000000000");
+        let test_key = U256::from(1);
+
+        journal
+            .state
+            .insert(test_address, Account::from(AccountInfo::default()));
+
+        let mut db = EmptyDB::new();
+        journal.set_bal_storage_read_mode(BalStorageReadMode::OmitIfUnchanged);
+        journal
+            .sload_assume_account_present(&mut db, test_address, test_key, false)
+            .unwrap();
+
+        journal.set_bal_storage_read_mode(BalStorageReadMode::Required);
+        journal
+            .sload_assume_account_present(&mut db, test_address, test_key, false)
+            .unwrap();
+
+        let slot = journal
+            .state
+            .get(&test_address)
+            .unwrap()
+            .storage
+            .get(&test_key)
+            .unwrap();
+        assert_eq!(slot.bal_storage_read_mode, BalStorageReadMode::Required);
+        assert!(slot.should_update_bal());
+    }
+
+    #[test]
+    fn omit_mode_applies_to_slot_loaded_in_previous_transaction() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        let test_address = address!("1000000000000000000000000000000000000000");
+        let test_key = U256::from(1);
+
+        journal
+            .state
+            .insert(test_address, Account::from(AccountInfo::default()));
+
+        let mut db = EmptyDB::new();
+        journal
+            .sload_assume_account_present(&mut db, test_address, test_key, false)
+            .unwrap();
+        journal.commit_tx();
+
+        journal.set_bal_storage_read_mode(BalStorageReadMode::OmitIfUnchanged);
+        journal
+            .sload_assume_account_present(&mut db, test_address, test_key, false)
+            .unwrap();
+
+        let slot = journal
+            .state
+            .get(&test_address)
+            .unwrap()
+            .storage
+            .get(&test_key)
+            .unwrap();
+        assert_eq!(
+            slot.bal_storage_read_mode,
+            BalStorageReadMode::OmitIfUnchanged
+        );
+        assert!(!slot.should_update_bal());
+    }
+
+    #[test]
+    fn sstore_marks_bal_storage_read_required() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        let test_address = address!("1000000000000000000000000000000000000000");
+        let test_key = U256::from(1);
+
+        journal
+            .state
+            .insert(test_address, Account::from(AccountInfo::default()));
+        journal.set_bal_storage_read_mode(BalStorageReadMode::OmitIfUnchanged);
+
+        let mut db = EmptyDB::new();
+        journal
+            .sstore_assume_account_present(&mut db, test_address, test_key, U256::ZERO, false)
+            .unwrap();
+
+        let slot = journal
+            .state
+            .get(&test_address)
+            .unwrap()
+            .storage
+            .get(&test_key)
+            .unwrap();
+        assert_eq!(slot.bal_storage_read_mode, BalStorageReadMode::Required);
+        assert!(slot.should_update_bal());
     }
 }

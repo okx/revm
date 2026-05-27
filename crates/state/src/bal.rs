@@ -313,6 +313,7 @@ impl core::error::Error for BalError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EvmStorageSlot, TransactionId};
     use alloy_eip7928::{
         AccountChanges as AlloyAccountChanges, BalanceChange as AlloyBalanceChange,
         CodeChange as AlloyCodeChange, NonceChange as AlloyNonceChange,
@@ -432,6 +433,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![idx(3), idx(7)]
         );
+    }
+
+    #[test]
+    fn account_bal_omits_unchanged_omittable_storage_read() {
+        let key = StorageKey::from(1);
+        let mut slot = EvmStorageSlot::new(StorageValue::from(7), TransactionId::ZERO);
+        slot.mark_bal_storage_read_omittable();
+
+        let mut account = Account::default();
+        account.storage.insert(key, slot);
+
+        let mut bal = AccountBal::default();
+        bal.update(idx(0), &account);
+
+        assert!(bal.storage.storage.is_empty());
+    }
+
+    #[test]
+    fn account_bal_records_changed_omittable_storage_read() {
+        let key = StorageKey::from(1);
+        let mut slot = EvmStorageSlot::new_changed(
+            StorageValue::from(7),
+            StorageValue::from(9),
+            TransactionId::ZERO,
+        );
+        slot.mark_bal_storage_read_omittable();
+
+        let mut account = Account::default();
+        account.storage.insert(key, slot);
+
+        let mut bal = AccountBal::default();
+        bal.update(idx(0), &account);
+
+        assert!(bal.storage.storage.contains_key(&key));
     }
 
     #[test]

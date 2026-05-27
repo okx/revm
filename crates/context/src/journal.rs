@@ -22,7 +22,7 @@ use primitives::{
     hardfork::SpecId, Address, AddressMap, AddressSet, HashSet, Log, StorageKey, StorageValue,
     B256, U256,
 };
-use state::{Account, EvmState};
+use state::{Account, BalStorageReadMode, EvmState};
 use std::vec::Vec;
 
 /// A journal of state changes internal to the EVM
@@ -206,6 +206,16 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     fn set_eip7708_config(&mut self, disabled: bool, delayed_burn_disabled: bool) {
         self.inner
             .set_eip7708_config(disabled, delayed_burn_disabled);
+    }
+
+    #[inline]
+    fn bal_storage_read_mode(&self) -> BalStorageReadMode {
+        self.inner.bal_storage_read_mode
+    }
+
+    #[inline]
+    fn set_bal_storage_read_mode(&mut self, mode: BalStorageReadMode) {
+        self.inner.set_bal_storage_read_mode(mode);
     }
 
     #[inline]

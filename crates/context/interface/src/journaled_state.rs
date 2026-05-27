@@ -15,7 +15,7 @@ use primitives::{
     hardfork::SpecId, Address, AddressMap, AddressSet, Bytes, HashSet, Log, StorageKey,
     StorageValue, B256, U256,
 };
-use state::{Account, AccountInfo, Bytecode};
+use state::{Account, AccountInfo, BalStorageReadMode, Bytecode};
 use std::{borrow::Cow, vec::Vec};
 /// Trait that contains database and journal of all changes that were made to the state.
 pub trait JournalTr {
@@ -149,6 +149,14 @@ pub trait JournalTr {
     ///   accounts. When disabled, the logging can be done outside of revm when applying
     ///   accounts to database state.
     fn set_eip7708_config(&mut self, disabled: bool, delayed_burn_disabled: bool);
+
+    /// Returns the current BAL storage read recording mode.
+    fn bal_storage_read_mode(&self) -> BalStorageReadMode {
+        BalStorageReadMode::Required
+    }
+
+    /// Sets the BAL storage read recording mode.
+    fn set_bal_storage_read_mode(&mut self, _mode: BalStorageReadMode) {}
 
     /// Touches the account.
     fn touch_account(&mut self, address: Address);

@@ -536,6 +536,17 @@ impl Default for AccountStatus {
     }
 }
 
+/// Controls whether an unchanged storage slot read is required in the BAL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BalStorageReadMode {
+    /// Record unchanged storage reads in the BAL.
+    #[default]
+    Required,
+    /// Omit the storage read from the BAL if the slot remains unchanged.
+    OmitIfUnchanged,
+}
+
 /// This type keeps track of the current value of a storage slot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -548,6 +559,9 @@ pub struct EvmStorageSlot {
     pub transaction_id: TransactionId,
     /// Represents if the storage slot is cold
     pub is_cold: bool,
+    /// Controls whether unchanged reads for this slot are required in the BAL.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub bal_storage_read_mode: BalStorageReadMode,
 }
 
 impl EvmStorageSlot {
@@ -558,6 +572,7 @@ impl EvmStorageSlot {
             present_value: original,
             transaction_id,
             is_cold: false,
+            bal_storage_read_mode: BalStorageReadMode::Required,
         }
     }
 
@@ -572,11 +587,31 @@ impl EvmStorageSlot {
             present_value,
             transaction_id,
             is_cold: false,
+            bal_storage_read_mode: BalStorageReadMode::Required,
         }
     }
+
     /// Returns true if the present value differs from the original value.
     pub fn is_changed(&self) -> bool {
         self.original_value != self.present_value
+    }
+
+    /// Returns true if this slot should be emitted into the BAL.
+    #[inline]
+    pub fn should_update_bal(&self) -> bool {
+        self.is_changed() || self.bal_storage_read_mode == BalStorageReadMode::Required
+    }
+
+    /// Marks the storage read as required in the BAL.
+    #[inline]
+    pub const fn mark_bal_storage_read_required(&mut self) {
+        self.bal_storage_read_mode = BalStorageReadMode::Required;
+    }
+
+    /// Marks the storage read as omittable from the BAL if the slot remains unchanged.
+    #[inline]
+    pub const fn mark_bal_storage_read_omittable(&mut self) {
+        self.bal_storage_read_mode = BalStorageReadMode::OmitIfUnchanged;
     }
 
     /// Returns the original value of the storage slot.

@@ -360,6 +360,10 @@ impl StorageBal {
     #[inline]
     pub fn update(&mut self, bal_index: BlockAccessIndex, storage: &EvmStorage) {
         for (key, value) in storage {
+            if !value.should_update_bal() {
+                continue;
+            }
+
             self.storage.entry(*key).or_default().update(
                 bal_index,
                 &value.original_value,

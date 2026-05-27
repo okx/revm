@@ -16,7 +16,7 @@ use primitives::{
     hash_map::Entry, Address, AddressMap, HashSet, StorageKey, StorageValue, B256, KECCAK_EMPTY,
     U256,
 };
-use state::{Account, Bytecode, EvmStorageSlot, TransactionId};
+use state::{Account, BalStorageReadMode, Bytecode, EvmStorageSlot, TransactionId};
 use std::vec::Vec;
 
 /// Trait that contains database and journal of all changes that were made to the account.
@@ -133,6 +133,8 @@ pub struct JournaledAccount<'a, DB, ENTRY: JournalEntryTr = JournalEntry> {
     access_list: &'a AddressMap<HashSet<StorageKey>>,
     /// Transaction ID.
     transaction_id: TransactionId,
+    /// Controls whether unchanged storage reads should be recorded in the BAL.
+    bal_storage_read_mode: BalStorageReadMode,
     /// Database used to load storage.
     db: &'a mut DB,
 }
@@ -147,6 +149,7 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
         db: &'a mut DB,
         access_list: &'a AddressMap<HashSet<StorageKey>>,
         transaction_id: TransactionId,
+        bal_storage_read_mode: BalStorageReadMode,
     ) -> Self {
         Self {
             address,
@@ -154,6 +157,7 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
             journal_entries,
             access_list,
             transaction_id,
+            bal_storage_read_mode,
             db,
         }
     }
@@ -170,9 +174,11 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
         skip_cold_load: bool,
     ) -> Result<StateLoad<&mut EvmStorageSlot>, JournalLoadError<DB::Error>> {
         let is_newly_created = self.account.is_created();
+        let bal_storage_read_mode = self.bal_storage_read_mode;
         let (slot, is_cold) = match self.account.storage.entry(key) {
             Entry::Occupied(occ) => {
                 let slot = occ.into_mut();
+                let loaded_in_previous_transaction = slot.transaction_id != self.transaction_id;
                 // skip load if account is cold.
                 let mut is_cold = false;
                 if slot.is_cold_transaction_id(self.transaction_id) {
@@ -186,6 +192,13 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
                     if is_cold && skip_cold_load {
                         return Err(JournalLoadError::ColdLoadSkipped);
                     }
+                }
+                match bal_storage_read_mode {
+                    BalStorageReadMode::Required => slot.mark_bal_storage_read_required(),
+                    BalStorageReadMode::OmitIfUnchanged if loaded_in_previous_transaction => {
+                        slot.mark_bal_storage_read_omittable();
+                    }
+                    BalStorageReadMode::OmitIfUnchanged => {}
                 }
                 slot.mark_warm_with_transaction_id(self.transaction_id);
                 (slot, is_cold)
@@ -211,7 +224,11 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
                     self.db.storage(self.address, key)?
                 };
 
-                let slot = vac.insert(EvmStorageSlot::new(value, self.transaction_id));
+                let mut slot = EvmStorageSlot::new(value, self.transaction_id);
+                if bal_storage_read_mode == BalStorageReadMode::OmitIfUnchanged {
+                    slot.mark_bal_storage_read_omittable();
+                }
+                let slot = vac.insert(slot);
                 (slot, is_cold)
             }
         };
@@ -241,7 +258,7 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
         self.touch();
 
         // assume that acc exists and load the slot.
-        let slot = self.sload_concrete_error(key, skip_cold_load)?;
+        let mut slot = self.sload_concrete_error(key, skip_cold_load)?;
 
         let ret = Ok(StateLoad::new(
             SStoreResult {
@@ -251,6 +268,8 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
             },
             slot.is_cold,
         ));
+
+        slot.mark_bal_storage_read_required();
 
         // when new value is different from present, we need to add a journal entry and make a change.
         if slot.present_value != new {
