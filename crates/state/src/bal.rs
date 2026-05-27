@@ -313,7 +313,7 @@ impl core::error::Error for BalError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EvmStorageSlot, TransactionId};
+    use crate::{BalStorageReadMode, EvmStorageSlot, TransactionId};
     use alloy_eip7928::{
         AccountChanges as AlloyAccountChanges, BalanceChange as AlloyBalanceChange,
         CodeChange as AlloyCodeChange, NonceChange as AlloyNonceChange,
@@ -439,7 +439,7 @@ mod tests {
     fn account_bal_omits_unchanged_omittable_storage_read() {
         let key = StorageKey::from(1);
         let mut slot = EvmStorageSlot::new(StorageValue::from(7), TransactionId::ZERO);
-        slot.mark_bal_storage_read_omittable();
+        slot.bal_storage_read_mode = BalStorageReadMode::OmitIfUnchanged;
 
         let mut account = Account::default();
         account.storage.insert(key, slot);
@@ -458,7 +458,7 @@ mod tests {
             StorageValue::from(9),
             TransactionId::ZERO,
         );
-        slot.mark_bal_storage_read_omittable();
+        slot.bal_storage_read_mode = BalStorageReadMode::OmitIfUnchanged;
 
         let mut account = Account::default();
         account.storage.insert(key, slot);

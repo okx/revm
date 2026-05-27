@@ -194,9 +194,11 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
                     }
                 }
                 match bal_storage_read_mode {
-                    BalStorageReadMode::Required => slot.mark_bal_storage_read_required(),
+                    BalStorageReadMode::Required => {
+                        slot.bal_storage_read_mode = BalStorageReadMode::Required;
+                    }
                     BalStorageReadMode::OmitIfUnchanged if loaded_in_previous_transaction => {
-                        slot.mark_bal_storage_read_omittable();
+                        slot.bal_storage_read_mode = BalStorageReadMode::OmitIfUnchanged;
                     }
                     BalStorageReadMode::OmitIfUnchanged => {}
                 }
@@ -226,7 +228,7 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
 
                 let mut slot = EvmStorageSlot::new(value, self.transaction_id);
                 if bal_storage_read_mode == BalStorageReadMode::OmitIfUnchanged {
-                    slot.mark_bal_storage_read_omittable();
+                    slot.bal_storage_read_mode = BalStorageReadMode::OmitIfUnchanged;
                 }
                 let slot = vac.insert(slot);
                 (slot, is_cold)
@@ -269,7 +271,7 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
             slot.is_cold,
         ));
 
-        slot.mark_bal_storage_read_required();
+        slot.bal_storage_read_mode = BalStorageReadMode::Required;
 
         // when new value is different from present, we need to add a journal entry and make a change.
         if slot.present_value != new {

@@ -602,18 +602,6 @@ impl EvmStorageSlot {
         self.is_changed() || self.bal_storage_read_mode == BalStorageReadMode::Required
     }
 
-    /// Marks the storage read as required in the BAL.
-    #[inline]
-    pub const fn mark_bal_storage_read_required(&mut self) {
-        self.bal_storage_read_mode = BalStorageReadMode::Required;
-    }
-
-    /// Marks the storage read as omittable from the BAL if the slot remains unchanged.
-    #[inline]
-    pub const fn mark_bal_storage_read_omittable(&mut self) {
-        self.bal_storage_read_mode = BalStorageReadMode::OmitIfUnchanged;
-    }
-
     /// Returns the original value of the storage slot.
     #[inline]
     pub const fn original_value(&self) -> StorageValue {
