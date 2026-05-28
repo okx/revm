@@ -193,6 +193,9 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
                         return Err(JournalLoadError::ColdLoadSkipped);
                     }
                 }
+                // Required reads in this transaction must not be downgraded by a later
+                // omit-mode read. If the slot was loaded in a previous transaction, the
+                // current transaction can still choose omit-mode as its first access.
                 match bal_storage_read_mode {
                     BalStorageReadMode::Required => {
                         slot.bal_storage_read_mode = BalStorageReadMode::Required;
