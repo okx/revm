@@ -205,7 +205,6 @@ where
         let ctx = evm.ctx();
         let tx = ctx.tx();
         let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let is_gasless = tx.is_gasless();
         let tx_gas_limit = tx.gas_limit();
         let is_regolith = ctx.cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
 
@@ -235,9 +234,10 @@ where
                 // For regular transactions prior to Regolith and all transactions after
                 // Regolith, gas is reported as normal.
                 gas.erase_cost(remaining);
-                if !is_gasless {
-                    gas.record_refund(refunded);
-                }
+                // Gasless txs are not charged or reimbursed fees, but gas accounting
+                // (including the EIP-3529 gas refund) must still be applied so that the
+                // reported gas usage is correct.
+                gas.record_refund(refunded);
             } else if is_deposit && tx.is_system_transaction() {
                 // System transactions were a special type of deposit transaction in
                 // the Bedrock hardfork that did not incur any gas costs.
@@ -293,10 +293,8 @@ where
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         eip7702_refund: i64,
     ) {
-        if evm.ctx().tx().is_gasless() {
-            return;
-        }
-
+        // Gasless txs still apply gas refunds (only fee charge/reimbursement is skipped),
+        // so the reported gas usage matches a normal tx.
         frame_result.gas_mut().record_refund(eip7702_refund);
 
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
@@ -1503,7 +1501,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn test_gasless_consume_gas_without_refund() {
+        fn test_gasless_consume_gas_applies_gas_refund() {
             let ctx = Context::op()
                 .with_tx(
                     OpTransaction::builder()
@@ -1519,7 +1517,38 @@ mod tests {
             let gas = call_last_frame_return(ctx, InstructionResult::Stop, ret_gas);
             assert_eq!(gas.remaining(), 90);
             assert_eq!(gas.spent(), 10);
-            assert_eq!(gas.refunded(), 0);
+            assert_eq!(gas.refunded(), 2); // min(20, 10/5), same as a non-gasless tx
+        }
+
+        #[test]
+        fn test_gasless_refund_applies_eip7702_refund() {
+            // The EIP-7702 refund and the final refund cap also apply to gasless txs.
+            let ctx = Context::op()
+                .with_tx(
+                    OpTransaction::builder()
+                        .base(TxEnv::builder().gas_limit(100))
+                        .gasless(true)
+                        .build_fill(),
+                )
+                .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS));
+
+            let mut evm = ctx.build_op();
+            let handler =
+                OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+            let mut gas = Gas::new(100);
+            gas.set_spent(50);
+            let mut exec_result = FrameResult::Call(CallOutcome::new(
+                InterpreterResult {
+                    result: InstructionResult::Return,
+                    output: Default::default(),
+                    gas,
+                },
+                0..0,
+            ));
+
+            handler.refund(&mut evm, &mut exec_result, 100);
+            assert_eq!(exec_result.gas().refunded(), 10); // min(100, 50/5)
         }
 
         #[test]
