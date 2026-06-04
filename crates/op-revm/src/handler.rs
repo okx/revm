@@ -1500,6 +1500,64 @@ mod tests {
     mod xlayer_tests {
         use super::*;
 
+        // Builds a gasless tx with gas_price = 0 under basefee = 10 and runs `validate_env`.
+        // gas_price < basefee normally fails with `GasPriceLessThanBasefee`; `disable_base_fee`
+        // (the `optional_no_base_fee` feature) is the knob that lets such a tx validate.
+        fn validate_env_gasless_zero_gas_price(
+            cfg: CfgEnv<OpSpecId>,
+        ) -> Result<(), EVMError<core::convert::Infallible, OpTransactionError>> {
+            let ctx = Context::op()
+                .with_block(BlockEnv {
+                    basefee: 10,
+                    ..Default::default()
+                })
+                .with_cfg(cfg)
+                .with_tx(
+                    OpTransaction::builder()
+                        .base(
+                            TxEnv::builder()
+                                .caller(Address::ZERO)
+                                .gas_limit(100)
+                                .gas_price(0),
+                        )
+                        .enveloped_tx(Some(bytes!("FACADE")))
+                        .gasless(true)
+                        .build()
+                        .unwrap(),
+                );
+
+            let mut evm = ctx.build_op();
+            let handler =
+                OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+            handler.validate_env(&mut evm)
+        }
+
+        #[test]
+        fn test_gasless_cfgdisablebasefeecheck_rejected() {
+            // disable_base_fee is off, so even a gasless tx is rejected by the basefee check.
+            let err = validate_env_gasless_zero_gas_price(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    EVMError::Transaction(OpTransactionError::Base(
+                        InvalidTransaction::GasPriceLessThanBasefee
+                    ))
+                ),
+                "expected GasPriceLessThanBasefee, got {err:?}"
+            );
+        }
+
+        // Gasless chains run with `disable_base_fee`, which skips the basefee check so a gasless
+        // gas_price = 0 tx validates.
+        #[cfg(feature = "optional_no_base_fee")]
+        #[test]
+        fn test_gasless_cfgdisablebasefeecheck_succeed() {
+            let mut cfg = CfgEnv::new_with_spec(OpSpecId::ISTHMUS);
+            cfg.disable_base_fee = true;
+            validate_env_gasless_zero_gas_price(cfg).unwrap();
+        }
+
         #[test]
         fn test_gasless_consume_gas_applies_gas_refund() {
             let ctx = Context::op()
@@ -1581,6 +1639,8 @@ mod tests {
                             TxEnv::builder()
                                 .caller(caller)
                                 .gas_limit(100)
+                                // gas_price > balance so a normal tx would fail the max-fee
+                                // balance check / deduct fees; gasless must skip both.
                                 .gas_price(1_000)
                                 .value(U256::from(7)),
                         )
@@ -1619,6 +1679,8 @@ mod tests {
                             TxEnv::builder()
                                 .caller(caller)
                                 .gas_limit(100)
+                                // gas_price > basefee so a normal tx would reimburse the caller
+                                // and reward the beneficiary a positive amount
                                 .gas_price(100),
                         )
                         .enveloped_tx(Some(bytes!("FACADE")))
