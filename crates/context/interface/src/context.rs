@@ -72,6 +72,8 @@ pub trait ContextTr: Host {
         let (_, _, cfg, _, _, _, _) = self.all();
         cfg
     }
+    /// Get a mutable reference to the configuration.
+    fn cfg_mut(&mut self) -> &mut Self::Cfg;
     /// Get the journal
     fn journal(&self) -> &Self::Journal {
         let (_, _, _, _, journal, _, _) = self.all();

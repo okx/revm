@@ -4,7 +4,7 @@ use crate::{
     OpTransactionError,
 };
 use revm::{
-    context::{result::ExecResultAndState, ContextSetters},
+    context::{result::ExecResultAndState, CfgEnv, ContextSetters},
     context_interface::{
         result::{EVMError, ExecutionResult},
         Cfg, ContextTr, Database, JournalTr,
@@ -22,12 +22,38 @@ use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
 };
 
+/// Extension of [`Cfg`] that allows mutating the base-fee check state.
+///
+/// This is used by [`OpHandler::validate_env`] to temporarily disable the
+/// base-fee check for gasless transactions (`gas_price == 0`) without
+/// requiring callers to set `CfgEnv::disable_base_fee` externally.
+pub trait OpCfg: Cfg {
+    /// Temporarily disable or re-enable the base-fee check.
+    ///
+    /// When `disabled = true`, `is_base_fee_check_disabled()` must return `true`.
+    /// When `disabled = false`, the check is restored to the "enabled" state.
+    ///
+    /// A no-op implementation is acceptable when the `optional_no_base_fee`
+    /// feature is absent; in that case gasless txs will still fail validation.
+    fn set_base_fee_check_disabled(&mut self, disabled: bool);
+}
+
+impl<SPEC: Into<revm::primitives::hardfork::SpecId> + Clone> OpCfg for CfgEnv<SPEC> {
+    #[cfg(feature = "optional_no_base_fee")]
+    fn set_base_fee_check_disabled(&mut self, disabled: bool) {
+        self.disable_base_fee = disabled;
+    }
+
+    #[cfg(not(feature = "optional_no_base_fee"))]
+    fn set_base_fee_check_disabled(&mut self, _disabled: bool) {}
+}
+
 /// Type alias for Optimism context
 pub trait OpContextTr:
     ContextTr<
     Journal: JournalTr<State = EvmState>,
     Tx: OpTxTr,
-    Cfg: Cfg<Spec = OpSpecId>,
+    Cfg: OpCfg<Spec = OpSpecId>,
     Chain = L1BlockInfo,
 >
 {
@@ -37,7 +63,7 @@ impl<T> OpContextTr for T where
     T: ContextTr<
         Journal: JournalTr<State = EvmState>,
         Tx: OpTxTr,
-        Cfg: Cfg<Spec = OpSpecId>,
+        Cfg: OpCfg<Spec = OpSpecId>,
         Chain = L1BlockInfo,
     >
 {
