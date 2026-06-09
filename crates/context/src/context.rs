@@ -103,6 +103,11 @@ impl<
     }
 
     #[inline]
+    fn cfg_mut(&mut self) -> &mut Self::Cfg {
+        &mut self.cfg
+    }
+
+    #[inline]
     fn error(&mut self) -> &mut Result<(), ContextError<<Self::Db as Database>::Error>> {
         &mut self.error
     }

@@ -1,6 +1,6 @@
 //!Handler related to Optimism chain
 use crate::{
-    api::exec::OpContextTr,
+    api::exec::{OpCfg, OpContextTr},
     constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
     transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
     L1BlockInfo, OpHaltReason, OpSpecId,
@@ -98,7 +98,25 @@ where
             return Err(OpTransactionError::MissingEnvelopedTx.into());
         }
 
-        self.mainnet.validate_env(evm)
+        // Gasless transactions have gas_price == 0, which revm's generic base-fee check
+        // rejects with GasPriceLessThanBasefee.  Temporarily lift the check for the
+        // duration of validate_env and restore the original value afterwards.
+        // All other gasless fee policy (L1 fee charge, reimbursement) is handled by
+        // OpHandler based on tx.is_gasless() and does not require this.
+        //
+        // Cfg::set_base_fee_check_disabled is a no-op when the `optional_no_base_fee`
+        // feature is absent; in that case gasless txs still fail the base-fee check
+        // (the feature is included in op-revm's default features for xlayer builds).
+        let is_gasless = evm.ctx().tx().is_gasless();
+        let prev_base_fee_disabled = evm.ctx().cfg().is_base_fee_check_disabled();
+        if is_gasless {
+            evm.ctx_mut().cfg_mut().set_base_fee_check_disabled(true);
+        }
+        let result = self.mainnet.validate_env(evm);
+        if is_gasless {
+            evm.ctx_mut().cfg_mut().set_base_fee_check_disabled(prev_base_fee_disabled);
+        }
+        result
     }
 
     fn validate_against_state_and_deduct_caller(
@@ -1532,30 +1550,74 @@ mod tests {
             handler.validate_env(&mut evm)
         }
 
-        #[test]
-        fn test_gasless_cfgdisablebasefeecheck_rejected() {
-            // disable_base_fee is off, so even a gasless tx is rejected by the basefee check.
-            let err = validate_env_gasless_zero_gas_price(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))
-                .unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    EVMError::Transaction(OpTransactionError::Base(
-                        InvalidTransaction::GasPriceLessThanBasefee
-                    ))
-                ),
-                "expected GasPriceLessThanBasefee, got {err:?}"
-            );
-        }
-
-        // Gasless chains run with `disable_base_fee`, which skips the basefee check so a gasless
-        // gas_price = 0 tx validates.
         #[cfg(feature = "optional_no_base_fee")]
         #[test]
-        fn test_gasless_cfgdisablebasefeecheck_succeed() {
+        fn test_gasless_validate_env_passes_without_disable_base_fee() {
+            // OpHandler now bypasses the basefee check internally for is_gasless txs,
+            // so no external cfg flag is needed.
+            validate_env_gasless_zero_gas_price(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))
+                .expect("gasless tx must pass validate_env without disable_base_fee");
+        }
+
+        #[cfg(feature = "optional_no_base_fee")]
+        #[test]
+        fn test_gasless_validate_env_restores_disable_base_fee() {
+            // Verify that disable_base_fee is restored to its original value after
+            // validate_env returns, regardless of what it was set to before.
+            let ctx = Context::op()
+                .with_block(BlockEnv { basefee: 10, ..Default::default() })
+                .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))
+                .with_tx(
+                    OpTransaction::builder()
+                        .base(
+                            TxEnv::builder()
+                                .caller(Address::ZERO)
+                                .gas_limit(100)
+                                .gas_price(0),
+                        )
+                        .enveloped_tx(Some(bytes!("FACADE")))
+                        .gasless(true)
+                        .build()
+                        .unwrap(),
+                );
+            let mut evm = ctx.build_op();
+            let handler =
+                OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+            // base fee check starts enabled (not disabled)
+            assert!(!evm.ctx().cfg().is_base_fee_check_disabled());
+            handler.validate_env(&mut evm).expect("should pass");
+            // must be restored — not left as disabled
+            assert!(!evm.ctx().cfg().is_base_fee_check_disabled(), "base fee check must be restored");
+        }
+
+        // Gasless chains may also run with explicit `disable_base_fee`; the flag is preserved.
+        #[cfg(feature = "optional_no_base_fee")]
+        #[test]
+        fn test_gasless_validate_env_preserves_existing_disable_base_fee() {
             let mut cfg = CfgEnv::new_with_spec(OpSpecId::ISTHMUS);
             cfg.disable_base_fee = true;
-            validate_env_gasless_zero_gas_price(cfg).unwrap();
+            let ctx = Context::op()
+                .with_block(BlockEnv { basefee: 10, ..Default::default() })
+                .with_cfg(cfg)
+                .with_tx(
+                    OpTransaction::builder()
+                        .base(
+                            TxEnv::builder()
+                                .caller(Address::ZERO)
+                                .gas_limit(100)
+                                .gas_price(0),
+                        )
+                        .enveloped_tx(Some(bytes!("FACADE")))
+                        .gasless(true)
+                        .build()
+                        .unwrap(),
+                );
+            let mut evm = ctx.build_op();
+            let handler =
+                OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+            handler.validate_env(&mut evm).expect("should pass");
+            // pre-existing disabled state must survive the restore
+            assert!(evm.ctx().cfg().is_base_fee_check_disabled(), "pre-existing base fee disabled must be kept");
         }
 
         #[test]
